@@ -1,0 +1,74 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch: {}
+
+jobs:
+  # 创建 Github Releases
+  create-release:
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # https://github.com/taiki-e/create-gh-release-action
+      - uses: taiki-e/create-gh-release-action@v1
+        with:
+          # (optional) Path to changelog.
+          # changelog: CHANGELOG.md
+          # (required) GitHub token for creating GitHub Releases.
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  # 自动构建跨平台 Rust 二进制文件并上传到 GitHub Release
+  upload-assets:
+    needs: create-release
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # 非本机三元组, 由 corss 通过容器提供交叉编译支持: https://github.com/cross-rs/cross?#supported-targets
+          # cross 具有与 Cargo 完全相同的 CLI, 但依赖于 Docker 或 Podman
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+          # 本机三元组, cargo 直接编译
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # 安装交叉编译工具链: https://github.com/taiki-e/setup-cross-toolchain-action
+      # 如果安装 target 对应的工具链, 则下一步不会再安装并调用 cross 创建容器来编译, 可大幅缩短构建时间
+      - name: Install cross-compilation tools
+        continue-on-error: true
+        uses: taiki-e/setup-cross-toolchain-action@v1
+        with:
+          target: ${{ matrix.target }}
+
+      # 构建并发布 Rust 程序: https://github.com/taiki-e/upload-rust-binary-action
+      - uses: taiki-e/upload-rust-binary-action@v1
+        with:
+          # (required) Comma-separated list of binary names (non-extension portion of filename) to build and upload.
+          bin: ${{ github.event.repository.name }}
+          # (optional) Target triple, default is host triple.
+          target: ${{ matrix.target }}
+          # (optional) Tool to build binaries (cargo, cross, or cargo-zigbuild)
+          # build-tool: cargo-zigbuild # 使用 zig 作为链接器编译 Cargo 项目, 以便于交叉编译, 仅 Linux 平台支持性较好
+          # (optional) Archive name (non-extension portion of filename) to be uploaded.
+          # When multiple binary names are specified, default archive name or $bin variable cannot be used.
+          archive: ${{ github.event.repository.name }}-$tag-$target
+          # (optional) On which platform to distribute the `.tar.gz` file.
+          tar: unix
+          # (optional) On which platform to distribute the `.zip` file.
+          zip: windows
+          # (required) GitHub token for uploading assets to GitHub Releases.
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+permissions:
+  contents: write
