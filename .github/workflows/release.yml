@@ -42,6 +42,8 @@ jobs:
             os: windows-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive # 递归检出git子模块(submodules)
 
       # 安装交叉编译工具链: https://github.com/taiki-e/setup-cross-toolchain-action
       # 如果安装 target 对应的工具链, 则下一步不会再安装并调用 cross 创建容器来编译, 可大幅缩短构建时间
