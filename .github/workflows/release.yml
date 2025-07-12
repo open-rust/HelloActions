@@ -4,100 +4,73 @@ on:
   push:
     tags:
       - "v*.*.*"
-  workflow_dispatch:
+  workflow_dispatch: {}
 
 jobs:
-  build:
-    name: build ${{ matrix.file }} on ${{ matrix.os }}
+  # 创建 Github Releases
+  create-release:
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@master
+      # https://github.com/taiki-e/create-gh-release-action
+      - uses: taiki-e/create-gh-release-action@v1
+        with:
+          # (optional) Path to changelog.
+          # changelog: CHANGELOG.md
+          # (required) GitHub token for creating GitHub Releases.
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  # 自动构建跨平台 Rust 二进制文件并上传到 GitHub Release
+  upload-assets:
+    needs: create-release
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os:
-          - windows-latest
-          - ubuntu-latest # target: x86_64-unknown-linux-musl
-          - macos-latest
-        file:
-          - ${{ github.event.repository.name }}
-    runs-on: ${{ matrix.os }}
-    defaults:
-      run:
-        shell: bash
-    env:
-      # 不同构建目标对应的 release 目录
-      TARGET: ${{ matrix.os == 'ubuntu-latest' && 'target/x86_64-unknown-linux-musl/release' || 'target/release' }}
-      # 构建文件名, Windows 平台有 .exe 后缀
-      NAME: ${{ format('{0}{1}', matrix.file, startsWith(matrix.os, 'windows') && '.exe' || '') }}
-      # 上传制品文件名
-      ARTIFACT_NAME: Binary-${{ matrix.file }}-${{ matrix.os }}
+        include:
+          # 非本机三元组, 由 corss 通过容器提供交叉编译支持: https://github.com/cross-rs/cross?#supported-targets
+          # cross 具有与 Cargo 完全相同的 CLI, 但依赖于 Docker 或 Podman
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+          # 本机三元组, cargo 直接编译
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
     steps:
       - uses: actions/checkout@master
         with:
           submodules: recursive # 递归检出git子模块(submodules)
 
-      - name: Cache
-        id: cache
-        uses: actions/cache@v3
+      # 安装交叉编译工具链: https://github.com/taiki-e/setup-cross-toolchain-action
+      # 如果安装 target 对应的工具链, 则下一步不会再安装并调用 cross 创建容器来编译, 可大幅缩短构建时间
+      - name: Install cross-compilation tools
+        continue-on-error: true
+        uses: taiki-e/setup-cross-toolchain-action@v1
         with:
-          path: |
-            ~/.cargo
-            ~/.rustup
-            ./target
-          key: ${{ runner.os }}-${{ matrix.file }}-cache
+          target: ${{ matrix.target }}
 
-      - name: musl-tools
-        if: matrix.os == 'ubuntu-latest'
-        run: |
-          sudo apt install -y musl-tools
-
-      - name: Rustup
-        if: steps.cache.outputs.cache-hit != 'true' && matrix.os == 'ubuntu-latest'
-        run: |
-          rustup target add x86_64-unknown-linux-musl
-
-      - name: Build
-        env:
-          CARGO_TERM_COLOR: always
-        run: |
-          cargo build --release --verbose \
-            ${{ matrix.os == 'ubuntu-latest' && '--target x86_64-unknown-linux-musl' || '--' }}
-
-      - name: Naming ${{ env.NAMING }}
-        id: naming
-        env:
-          NAMING: >-
-            ${{
-              format('{0}-{1}-{2}-{3}{4}',
-                matrix.file, github.ref_name, runner.os, runner.arch,
-                startsWith(matrix.os, 'windows') && '.exe' || ''
-              )
-            }}
-        run: |
-          export NAMING="$( echo ${{ env.NAMING }} | tr [:upper:] [:lower:] )"
-          echo "FILEPATH=$TARGET/$NAMING" >> $GITHUB_OUTPUT
-
-      - name: Rename file
-        run: |
-          mv "$TARGET/$NAME" ${{ steps.naming.outputs.FILEPATH }}
-
-      - name: Upload
-        uses: actions/upload-artifact@master
-        id: artifact-upload-step
+      # 构建并发布 Rust 程序: https://github.com/taiki-e/upload-rust-binary-action
+      - uses: taiki-e/upload-rust-binary-action@v1
         with:
-          name: ${{ env.ARTIFACT_NAME }}
-          path: ${{ steps.naming.outputs.FILEPATH }}
-
-      - name: GH Release on ${{ matrix.os }}
-        uses: softprops/action-gh-release@v2.0.2
-        if: startsWith(github.ref, 'refs/tags/')
-        with:
+          # (required) Comma-separated list of binary names (non-extension portion of filename) to build and upload.
+          bin: ${{ github.event.repository.name }}
+          # (optional) Target triple, default is host triple.
+          target: ${{ matrix.target }}
+          # (optional) Tool to build binaries (cargo, cross, or cargo-zigbuild)
+          # build-tool: cargo-zigbuild # 使用 zig 作为链接器编译 Cargo 项目, 以便于交叉编译, 仅 Linux 平台支持性较好
+          # (optional) Archive name (non-extension portion of filename) to be uploaded.
+          # When multiple binary names are specified, default archive name or $bin variable cannot be used.
+          archive: ${{ github.event.repository.name }}-$tag-$target
+          # (optional) On which platform to distribute the `.tar.gz` file.
+          tar: unix
+          # (optional) On which platform to distribute the `.zip` file.
+          zip: windows
+          # (required) GitHub token for uploading assets to GitHub Releases.
           token: ${{ secrets.GITHUB_TOKEN }}
-          files: ${{ steps.naming.outputs.FILEPATH }}
-
-      - name: Done
-        if: startsWith(github.ref, 'refs/tags/')
-        run: |
-          echo "### [${{ github.ref_name }}](https://github.com/$GITHUB_REPOSITORY/releases/tag/${{ github.ref_name }}) Released! :rocket:" \
-            >> $GITHUB_STEP_SUMMARY
 
 permissions:
   contents: write
